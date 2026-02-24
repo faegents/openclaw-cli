@@ -1,19 +1,21 @@
 import sys
+import time
 import click
 import anthropic
+from rich.live import Live
 from rich.prompt import Prompt
-from rich.markdown import Markdown
 
 from .config import load_config, save_config, Config
 from .workspace import WorkspaceFetcher
 from .chat import build_system_prompt, stream_chat
 from .display import (
     console,
-    make_header,
+    make_header_panel,
     make_projects_panel,
     make_todo_panel,
     make_activity_panel,
-    make_dashboard,
+    make_dashboard_static,
+    make_live_layout,
 )
 
 
@@ -30,31 +32,48 @@ def cli(ctx: click.Context) -> None:
 
 
 @cli.command()
-def dashboard() -> None:
-    """Show a static TUI dashboard (projects, todos, activity)."""
+@click.option("--watch", "-w", is_flag=True, default=False, help="Live-refresh the dashboard.")
+@click.option("--interval", "-i", default=30, show_default=True, help="Refresh interval in seconds (watch mode).")
+def dashboard(watch: bool, interval: int) -> None:
+    """Show the workspace dashboard (projects, issues, activity)."""
     config = load_config()
     if not config.github_token:
-        console.print("[red]Error: GITHUB_TOKEN not configured. Run: oc configure[/red]")
+        console.print("[red]Error:[/red] GITHUB_TOKEN not configured. Run: [bold]oc configure[/bold]")
         sys.exit(1)
 
-    console.print("[dim]Fetching workspace state...[/dim]")
     fetcher = _get_fetcher(config)
-    state = fetcher.get_workspace_state()
-    layout = make_dashboard(state)
-    console.print(layout)
+
+    if watch:
+        console.print("[dim]Fetching workspace state...[/dim]")
+        state = fetcher.get_workspace_state()
+        with Live(make_live_layout(state), screen=True, refresh_per_second=4) as live:
+            elapsed = 0
+            try:
+                while True:
+                    time.sleep(1)
+                    elapsed += 1
+                    if elapsed >= interval:
+                        state = fetcher.get_workspace_state()
+                        live.update(make_live_layout(state))
+                        elapsed = 0
+            except KeyboardInterrupt:
+                pass
+    else:
+        console.print("[dim]Fetching workspace state...[/dim]")
+        state = fetcher.get_workspace_state()
+        console.print(make_dashboard_static(state))
 
 
 @cli.command()
 @click.argument("message", required=False)
 def chat(message: str | None) -> None:
-    """Chat with OpenClaw via the Claude API.
+    """Chat with OpenClaw (one-shot or interactive REPL).
 
-    Provide a MESSAGE argument for a one-shot query, or omit it to enter
-    an interactive REPL session.
+    Pass MESSAGE for a single query, or omit for a multi-turn session.
     """
     config = load_config()
     if not config.anthropic_api_key:
-        console.print("[red]Error: ANTHROPIC_API_KEY not configured. Run: oc configure[/red]")
+        console.print("[red]Error:[/red] ANTHROPIC_API_KEY not configured. Run: [bold]oc configure[/bold]")
         sys.exit(1)
 
     client = anthropic.Anthropic(api_key=config.anthropic_api_key)
@@ -81,8 +100,8 @@ def chat(message: str | None) -> None:
         console.print(f"[bold cyan]You:[/bold cyan] {message}")
         _send(message)
     else:
-        console.print(make_header("Interactive Chat"))
-        console.print("[dim]Type your message and press Enter. Type 'exit' or Ctrl-C to quit.[/dim]\n")
+        console.print(make_header_panel("Interactive Chat"))
+        console.print("[dim]Type your message and press Enter. 'exit' or Ctrl-C to quit.[/dim]\n")
         while True:
             try:
                 user_input = Prompt.ask("[bold cyan]You[/bold cyan]")
@@ -99,7 +118,7 @@ def chat(message: str | None) -> None:
 
 @cli.command()
 def status() -> None:
-    """Show current open items and blocked tasks."""
+    """Show open issues and blocked tasks from todo.md."""
     config = load_config()
     fetcher = _get_fetcher(config)
     todo_md = fetcher.get_file("memory/todo.md")
@@ -108,7 +127,7 @@ def status() -> None:
 
 @cli.command()
 def errors() -> None:
-    """List open errors and USER-ACTION-REQUIRED items from todo.md."""
+    """Alias for 'status' — list open errors and USER-ACTION-REQUIRED items."""
     config = load_config()
     fetcher = _get_fetcher(config)
     todo_md = fetcher.get_file("memory/todo.md")
@@ -125,18 +144,28 @@ def projects() -> None:
 
 
 @cli.command()
-@click.option("--lines", "-n", default=50, show_default=True, help="Number of log lines to display.")
-def logs(lines: int) -> None:
-    """Show recent monitor activity logs."""
+@click.option("--lines", "-n", default=40, show_default=True, help="Number of log lines to display.")
+def agents(lines: int) -> None:
+    """Show recent agent activity from monitor logs."""
     config = load_config()
     fetcher = _get_fetcher(config)
-    monitor_logs = fetcher.get_file("memory/monitor_logs.md")
-    console.print(make_activity_panel(monitor_logs, n=lines))
+    monitor_md = fetcher.get_file("memory/monitor_logs.md")
+    console.print(make_activity_panel(monitor_md, n=lines))
+
+
+@cli.command()
+@click.option("--lines", "-n", default=40, show_default=True, help="Number of log lines to display.")
+def logs(lines: int) -> None:
+    """Alias for 'agents' — show raw monitor log lines."""
+    config = load_config()
+    fetcher = _get_fetcher(config)
+    monitor_md = fetcher.get_file("memory/monitor_logs.md")
+    console.print(make_activity_panel(monitor_md, n=lines))
 
 
 @cli.command()
 def configure() -> None:
-    """Interactive configuration wizard — set API keys and workspace repo."""
+    """Interactive setup wizard — set API keys and workspace repo."""
     config = load_config()
 
     console.print("[bold]OpenClaw Configuration[/bold]\n")
@@ -153,7 +182,7 @@ def configure() -> None:
         password=True,
     )
     github_repo = Prompt.ask(
-        "GitHub repo (owner/name)",
+        "Workspace GitHub repo (owner/name)",
         default=config.github_repo,
     )
 
